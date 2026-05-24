@@ -6,6 +6,9 @@ BeforeAll {
     # Mock Set-ADTPreferenceVariables due to its expense when running via Pester.
     Mock -ModuleName PSAppDeployToolkit Set-ADTPreferenceVariables { }
 
+    # Mock Write-ADTLogEntry due to its expense when running via Pester.
+    Mock -ModuleName PSAppDeployToolkit Write-ADTLogEntry { }
+
     # System paths
     $script:FontsDir = "$env:SystemRoot\Fonts"
     $script:FontRegKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
@@ -13,15 +16,17 @@ BeforeAll {
     # Helper function to create and install a test font
     function Install-TestFont
     {
-        param(
-            [Parameter(Mandatory)]
-            [string]$Extension,
+        param
+        (
+            [Parameter(Mandatory = $true)]
+            [ValidateSet('.ttf', '.ttc', '.otf')]
+            [System.String]$Extension,
 
             [Parameter(Mandatory = $false)]
-            [int]$Skip = 0
+            [System.Int32]$Skip = 0
         )
 
-        $uniqueName = "PesterRemoveTest_$([guid]::NewGuid().ToString('N').Substring(0, 8))$Extension"
+        $uniqueName = "PesterRemoveTest_$([System.Guid]::NewGuid().ToString('N').Substring(0, 8))$Extension"
 
         # Find a source font (skip N fonts to allow getting different source fonts for multiple installs)
         $sourceFont = switch ($Extension)
@@ -31,13 +36,13 @@ BeforeAll {
             '.otf' { Get-ChildItem "$env:SystemRoot\Fonts\*.otf" | Select-Object -Skip $Skip -First 1 -ExpandProperty FullName }
         }
 
-        if (-not $sourceFont)
+        if (!$sourceFont)
         {
             throw "Could not find a system font with extension $Extension"
         }
 
         # Copy to TestDrive first
-        $testDrivePath = Join-Path $TestDrive $uniqueName
+        $testDrivePath = Join-Path -Path $TestDrive -ChildPath $uniqueName
         Copy-Item -Path $sourceFont -Destination $testDrivePath -Force
 
         # Install using Add-ADTFont
@@ -45,28 +50,31 @@ BeforeAll {
 
         # Get the registry name that was created
         $regKey = Get-Item -LiteralPath $script:FontRegKey
-        $registryName = $regKey.Property | Where-Object {
-            $regKey.GetValue($_) -eq $uniqueName
-        } | Select-Object -First 1
+        $registryName = $regKey.Property | & { process { if ($regKey.GetValue($_) -eq $uniqueName) { return $_ } } } | Select-Object -First 1
 
         return @{
-            FileName     = $uniqueName
+            FileName = $uniqueName
             RegistryName = $registryName
-            FilePath     = Join-Path $script:FontsDir $uniqueName
+            FilePath = Join-Path -Path $script:FontsDir -ChildPath $uniqueName
         }
     }
 
     # Helper function to verify font is completely removed
     function Test-FontRemoved
     {
-        param(
-            [Parameter(Mandatory)]
-            [string]$FileName,
-            [string]$RegistryName
+        param
+        (
+            [Parameter(Mandatory = $true)]
+            [PSAppDeployToolkit.Attributes.ValidateNotNullOrWhiteSpace()]
+            [System.String]$FileName,
+
+            [Parameter(Mandatory = $false)]
+            [PSAppDeployToolkit.Attributes.ValidateNotNullOrWhiteSpace()]
+            [System.String]$RegistryName
         )
 
         $result = @{
-            FileRemoved     = -not (Test-Path -LiteralPath (Join-Path $script:FontsDir $FileName))
+            FileRemoved = !(Test-Path -LiteralPath (Join-Path -Path $script:FontsDir -ChildPath $FileName))
             RegistryRemoved = $true
         }
 
@@ -74,7 +82,7 @@ BeforeAll {
         {
             try
             {
-                Get-ItemProperty -Path $script:FontRegKey -Name $RegistryName -ErrorAction Stop | Out-Null
+                $null = Get-ItemProperty -Path $script:FontRegKey -Name $RegistryName -ErrorAction Stop
                 $result.RegistryRemoved = $false
             }
             catch
@@ -89,9 +97,11 @@ BeforeAll {
     # Cleanup helper for fonts that may have been partially installed
     function Remove-TestFontForce
     {
-        param(
-            [Parameter(Mandatory)]
-            [string]$FileName
+        param
+        (
+            [Parameter(Mandatory = $true)]
+            [PSAppDeployToolkit.Attributes.ValidateNotNullOrWhiteSpace()]
+            [System.String]$FileName
         )
 
         # Try to remove using Remove-ADTFont first
@@ -105,7 +115,7 @@ BeforeAll {
         }
 
         # Fallback: If file still exists, force remove it
-        $fontPath = Join-Path $script:FontsDir $FileName
+        $fontPath = Join-Path -Path $script:FontsDir -ChildPath $FileName
         if (Test-Path -LiteralPath $fontPath)
         {
             Remove-Item -LiteralPath $fontPath -Force -ErrorAction SilentlyContinue
@@ -117,10 +127,13 @@ BeforeAll {
             $regKey = Get-Item -LiteralPath $script:FontRegKey -ErrorAction SilentlyContinue
             if ($regKey)
             {
-                $regKey.Property | ForEach-Object {
-                    if ($regKey.GetValue($_) -eq $FileName)
+                $regKey.Property | & {
+                    process
                     {
-                        Remove-ItemProperty -Path $script:FontRegKey -Name $_ -Force -ErrorAction SilentlyContinue
+                        if ($regKey.GetValue($_) -eq $FileName)
+                        {
+                            Remove-ItemProperty -Path $script:FontRegKey -Name $_ -Force -ErrorAction SilentlyContinue
+                        }
                     }
                 }
             }
@@ -133,7 +146,6 @@ BeforeAll {
 }
 
 Describe 'Remove-ADTFont' {
-
     Context 'Removal by Filename' {
         BeforeEach {
             $script:TestFont = Install-TestFont -Extension '.ttf'
@@ -175,18 +187,14 @@ Describe 'Remove-ADTFont' {
         It 'Should find registry entry by searching value data' {
             # Verify registry entry exists with filename as value
             $regKey = Get-Item -LiteralPath $script:FontRegKey
-            $matchingEntry = $regKey.Property | Where-Object {
-                $regKey.GetValue($_) -eq $script:TestFont.FileName
-            }
+            $matchingEntry = $regKey.Property | & { process { if ($regKey.GetValue($_) -eq $script:TestFont.FileName) { return $_ } } }
             $matchingEntry | Should -Not -BeNullOrEmpty
 
             Remove-ADTFont -Name $script:TestFont.FileName
 
             # Registry entry should be removed
             $regKey = Get-Item -LiteralPath $script:FontRegKey
-            $matchingEntry = $regKey.Property | Where-Object {
-                $regKey.GetValue($_) -eq $script:TestFont.FileName
-            }
+            $matchingEntry = $regKey.Property | & { process { if ($regKey.GetValue($_) -eq $script:TestFont.FileName) { return $_ } } }
             $matchingEntry | Should -BeNullOrEmpty
         }
     }
@@ -206,7 +214,7 @@ Describe 'Remove-ADTFont' {
 
         It 'Should remove font by registry name (e.g., "Font Name (TrueType)")' {
             # Skip if registry name wasn't captured
-            if (-not $script:TestFont.RegistryName)
+            if (!$script:TestFont.RegistryName)
             {
                 Set-ItResult -Skipped -Because 'Could not determine registry name'
                 return
@@ -223,7 +231,7 @@ Describe 'Remove-ADTFont' {
         }
 
         It 'Should resolve filename from registry value data' {
-            if (-not $script:TestFont.RegistryName)
+            if (!$script:TestFont.RegistryName)
             {
                 Set-ItResult -Skipped -Because 'Could not determine registry name'
                 return
@@ -243,14 +251,14 @@ Describe 'Remove-ADTFont' {
 
     Context 'Font Not Found Scenarios' {
         It 'Should handle non-existent font gracefully' {
-            $nonExistentFont = "NonExistent_$([guid]::NewGuid().ToString('N')).ttf"
+            $nonExistentFont = "NonExistent_$([System.Guid]::NewGuid().ToString('N')).ttf"
 
             # Should not throw, just log warning
             { Remove-ADTFont -Name $nonExistentFont } | Should -Not -Throw
         }
 
         It 'Should handle non-existent registry name gracefully' {
-            $nonExistentRegName = "NonExistent Font $([guid]::NewGuid().ToString('N')) (TrueType)"
+            $nonExistentRegName = "NonExistent Font $([System.Guid]::NewGuid().ToString('N')) (TrueType)"
 
             # Should not throw, just log warning
             { Remove-ADTFont -Name $nonExistentRegName } | Should -Not -Throw
@@ -316,7 +324,7 @@ Describe 'Remove-ADTFont' {
             # Use Skip 1 to get a different source font with different internal title
             $script:TestFonts += Install-TestFont -Extension '.ttf' -Skip 1
 
-            $nonExistentFont = "NonExistent_$([guid]::NewGuid().ToString('N')).ttf"
+            $nonExistentFont = "NonExistent_$([System.Guid]::NewGuid().ToString('N')).ttf"
 
             # Mix of valid fonts and non-existent font
             { Remove-ADTFont -Name @($script:TestFonts[0].FileName, $nonExistentFont, $script:TestFonts[1].FileName) -ErrorAction SilentlyContinue } | Should -Not -Throw
@@ -391,9 +399,7 @@ Describe 'Remove-ADTFont' {
 
             # Registry entry should be gone
             $regKey = Get-Item -LiteralPath $script:FontRegKey
-            $matchingEntry = $regKey.Property | Where-Object {
-                $regKey.GetValue($_) -eq $script:TestFont.FileName
-            }
+            $matchingEntry = $regKey.Property | & { process { if ($regKey.GetValue($_) -eq $script:TestFont.FileName) { return $_ } } }
             $matchingEntry | Should -BeNullOrEmpty
         }
     }
